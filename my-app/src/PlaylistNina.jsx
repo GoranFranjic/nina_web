@@ -20,15 +20,126 @@ export default function PlaylistNina() {
   const [searchTimeout, setSearchTimeout] = useState(null);
   const [audioOnly, setAudioOnly] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [player, setPlayer] = useState(null);
   
   const playerRef = useRef(null);
+
+  // YouTube Iframe API
+  useEffect(() => {
+    // Učitaj YouTube IFrame API
+    const tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    const firstScriptTag = document.getElementsByTagName('script')[0];
+    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+    // Globalna funkcija koju YouTube API očekuje
+    window.onYouTubeIframeAPIReady = () => {
+      console.log('YouTube API ready');
+    };
+
+    return () => {
+      if (player) {
+        player.destroy();
+      }
+    };
+  }, []);
+
+  // Inicijaliziraj player kada se current promijeni
+  useEffect(() => {
+    if (current && playerRef.current) {
+      initializePlayer();
+    }
+  }, [current, audioOnly]);
+
+  const initializePlayer = () => {
+    if (window.YT && playerRef.current) {
+      if (player) {
+        player.destroy();
+      }
+
+      const newPlayer = new window.YT.Player(playerRef.current, {
+        height: audioOnly ? '0' : '300',
+        width: '100%',
+        videoId: current,
+        playerVars: {
+          'autoplay': 1,
+          'controls': 1,
+          'rel': 0,
+          'modestbranding': 1,
+          'playsinline': 1,
+          ...(audioOnly && {
+            'controls': 0,
+            'showinfo': 0,
+            'iv_load_policy': 3
+          })
+        },
+        events: {
+          'onReady': onPlayerReady,
+          'onStateChange': onPlayerStateChange,
+          'onError': onPlayerError
+        }
+      });
+
+      setPlayer(newPlayer);
+    }
+  };
+
+  const onPlayerReady = (event) => {
+    console.log('Player ready');
+    if (audioOnly) {
+      event.target.setVolume(100);
+    }
+  };
+
+  const onPlayerStateChange = (event) => {
+    // YouTube player states:
+    // -1 (unstarted), 0 (ended), 1 (playing), 2 (paused), 3 (buffering), 5 (video cued)
+    
+    if (event.data === window.YT.PlayerState.PLAYING) {
+      setIsPlaying(true);
+    } else if (event.data === window.YT.PlayerState.PAUSED) {
+      setIsPlaying(false);
+    } else if (event.data === window.YT.PlayerState.ENDED) {
+      // Video je završio - pokreni sljedeću pjesmu
+      handleNextSong();
+    }
+  };
+
+  const onPlayerError = (event) => {
+    console.error('YouTube player error:', event);
+    setError('Greška pri reprodukciji videa. Pokušajte drugu pjesmu.');
+  };
+
+  const handleNextSong = () => {
+    if (current && songs.length > 0) {
+      const nextSong = getNextSong(songs, current);
+      if (nextSong) {
+        setCurrent(nextSong.id);
+        setIsPlaying(true);
+      } else {
+        // Kraj playliste
+        setCurrent(null);
+        setIsPlaying(false);
+      }
+    }
+  };
+
+  const handlePreviousSong = () => {
+    if (current && songs.length > 0) {
+      const currentIndex = songs.findIndex(song => song.id === current);
+      if (currentIndex > 0) {
+        const previousSong = songs[currentIndex - 1];
+        setCurrent(previousSong.id);
+        setIsPlaying(true);
+      }
+    }
+  };
 
   // Učitaj playlistu pri pokretanju
   useEffect(() => {
     const savedPlaylist = loadPlaylist();
     setSongs(savedPlaylist);
     
-    // Učitaj postavke
     const savedAudioOnly = localStorage.getItem('ninaAudioOnly');
     if (savedAudioOnly) {
       setAudioOnly(JSON.parse(savedAudioOnly));
@@ -39,58 +150,6 @@ export default function PlaylistNina() {
   useEffect(() => {
     localStorage.setItem('ninaAudioOnly', JSON.stringify(audioOnly));
   }, [audioOnly]);
-
-  // Auto-play sljedeće pjesme
-  useEffect(() => {
-    const handleVideoEnd = () => {
-      if (current && songs.length > 0) {
-        const nextSong = getNextSong(songs, current);
-        if (nextSong) {
-          setCurrent(nextSong.id);
-          setIsPlaying(true);
-        } else {
-          // Kraj playliste
-          setCurrent(null);
-          setIsPlaying(false);
-        }
-      }
-    };
-
-    // Dodaj event listener za YouTube player
-    const player = playerRef.current;
-    if (player) {
-      player.contentWindow.postMessage(
-        JSON.stringify({
-          event: 'listening',
-          id: current
-        }), 
-        '*'
-      );
-    }
-
-    // Slušaj YouTube API events
-    const messageHandler = (event) => {
-      if (event.origin !== 'https://www.youtube.com') return;
-      
-      try {
-        const data = JSON.parse(event.data);
-        if (data.event === 'onStateChange') {
-          if (data.info === 0) { // Video ended
-            handleVideoEnd();
-          } else if (data.info === 1) { // Playing
-            setIsPlaying(true);
-          } else if (data.info === 2) { // Paused
-            setIsPlaying(false);
-          }
-        }
-      } catch (e) {
-        // Nije YouTube message
-      }
-    };
-
-    window.addEventListener('message', messageHandler);
-    return () => window.removeEventListener('message', messageHandler);
-  }, [current, songs]);
 
   const handleSearch = async (query) => {
     if (!query.trim()) {
@@ -147,6 +206,9 @@ export default function PlaylistNina() {
     if (current === songId) {
       setCurrent(null);
       setIsPlaying(false);
+      if (player) {
+        player.stopVideo();
+      }
     }
   };
 
@@ -155,44 +217,32 @@ export default function PlaylistNina() {
     setSongs(emptyPlaylist);
     setCurrent(null);
     setIsPlaying(false);
+    if (player) {
+      player.stopVideo();
+    }
   };
 
   const handlePlay = (songId) => {
-    setCurrent(songId);
-    setIsPlaying(true);
+    if (current === songId && player) {
+      // Ako je ista pjesma, pauziraj/nastavi
+      if (isPlaying) {
+        player.pauseVideo();
+      } else {
+        player.playVideo();
+      }
+    } else {
+      // Nova pjesma
+      setCurrent(songId);
+      setIsPlaying(true);
+    }
   };
 
   const handleStop = () => {
     setCurrent(null);
     setIsPlaying(false);
-  };
-
-  const handlePlayNext = () => {
-    if (current && songs.length > 0) {
-      const nextSong = getNextSong(songs, current);
-      if (nextSong) {
-        setCurrent(nextSong.id);
-        setIsPlaying(true);
-      }
+    if (player) {
+      player.stopVideo();
     }
-  };
-
-  const handlePlayPrevious = () => {
-    if (current && songs.length > 0) {
-      const currentIndex = songs.findIndex(song => song.id === current);
-      if (currentIndex > 0) {
-        const previousSong = songs[currentIndex - 1];
-        setCurrent(previousSong.id);
-        setIsPlaying(true);
-      }
-    }
-  };
-
-  const getYouTubeEmbedUrl = (videoId, audioOnly = false) => {
-    if (audioOnly) {
-      return `https://www.youtube.com/embed/${videoId}?autoplay=1&rel=0&modestbranding=1&controls=1&disablekb=1&fs=0&iv_load_policy=3&showinfo=0`;
-    }
-    return `https://www.youtube.com/embed/${videoId}?autoplay=1&rel=0`;
   };
 
   // Očisti timeout pri unmountu
@@ -201,10 +251,14 @@ export default function PlaylistNina() {
       if (searchTimeout) {
         clearTimeout(searchTimeout);
       }
+      if (player) {
+        player.destroy();
+      }
     };
-  }, [searchTimeout]);
+  }, [searchTimeout, player]);
 
   const currentSong = songs.find(song => song.id === current);
+  const currentIndex = songs.findIndex(song => song.id === current);
 
   return (
     <div style={{ maxWidth: '800px', margin: '0 auto', padding: '20px' }}>
@@ -218,7 +272,7 @@ export default function PlaylistNina() {
               onChange={(e) => setAudioOnly(e.target.checked)}
               style={{ margin: 0 }}
             />
-            Samo glazba
+            Samo glazba (sakrij video)
           </label>
           {songs.length > 0 && (
             <button 
@@ -239,7 +293,7 @@ export default function PlaylistNina() {
         </div>
       </header>
 
-      {/* Search section - ostaje isti */}
+      {/* Search section */}
       <section style={{ marginBottom: '20px' }}>
         <input
           type="text"
@@ -397,15 +451,16 @@ export default function PlaylistNina() {
                     onClick={() => handlePlay(song.id)}
                     style={{ 
                       padding: '6px 12px', 
-                      background: current === song.id ? '#3b82f6' : '#4f46e5', 
+                      background: current === song.id && isPlaying ? '#059669' : '#3b82f6', 
                       color: 'white', 
                       border: 'none', 
                       borderRadius: '6px', 
                       cursor: 'pointer',
-                      fontSize: '13px'
+                      fontSize: '13px',
+                      minWidth: '80px'
                     }}
                   >
-                    {current === song.id && isPlaying ? '▶️ Svira' : 'Play'}
+                    {current === song.id ? (isPlaying ? '▶️ Svira' : '⏸ Pauza') : 'Play'}
                   </button>
                   <button 
                     onClick={() => handleRemoveFromPlaylist(song.id)}
@@ -445,24 +500,28 @@ export default function PlaylistNina() {
           }}>
             <div>
               <div style={{ fontWeight: '600', fontSize: '16px' }}>
-                🎵 Sada svira:
+                🎵 {isPlaying ? 'Sada svira:' : 'Pauzirano:'}
               </div>
               <div style={{ fontSize: '14px', color: '#6b7280', marginTop: '4px' }}>
                 {currentSong?.title} - {currentSong?.artistName}
+              </div>
+              <div style={{ fontSize: '12px', color: '#9ca3af', marginTop: '2px' }}>
+                Pjesma {currentIndex + 1} od {songs.length}
+                {audioOnly && ' • 🎧 Audio mod'}
               </div>
             </div>
             
             <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
               <button 
-                onClick={handlePlayPrevious}
-                disabled={songs.findIndex(song => song.id === current) === 0}
+                onClick={handlePreviousSong}
+                disabled={currentIndex === 0}
                 style={{ 
-                  padding: '6px 12px', 
-                  background: 'transparent', 
-                  color: songs.findIndex(song => song.id === current) === 0 ? '#9ca3af' : '#374151', 
-                  border: '1px solid #d1d5db', 
+                  padding: '8px 12px', 
+                  background: currentIndex === 0 ? '#f3f4f6' : '#3b82f6', 
+                  color: currentIndex === 0 ? '#9ca3af' : 'white', 
+                  border: 'none', 
                   borderRadius: '6px', 
-                  cursor: songs.findIndex(song => song.id === current) === 0 ? 'not-allowed' : 'pointer',
+                  cursor: currentIndex === 0 ? 'not-allowed' : 'pointer',
                   fontSize: '13px'
                 }}
               >
@@ -470,15 +529,15 @@ export default function PlaylistNina() {
               </button>
               
               <button 
-                onClick={handlePlayNext}
-                disabled={!getNextSong(songs, current)}
+                onClick={handleNextSong}
+                disabled={currentIndex === songs.length - 1}
                 style={{ 
-                  padding: '6px 12px', 
-                  background: 'transparent', 
-                  color: !getNextSong(songs, current) ? '#9ca3af' : '#374151', 
-                  border: '1px solid #d1d5db', 
+                  padding: '8px 12px', 
+                  background: currentIndex === songs.length - 1 ? '#f3f4f6' : '#3b82f6', 
+                  color: currentIndex === songs.length - 1 ? '#9ca3af' : 'white', 
+                  border: 'none', 
                   borderRadius: '6px', 
-                  cursor: !getNextSong(songs, current) ? 'not-allowed' : 'pointer',
+                  cursor: currentIndex === songs.length - 1 ? 'not-allowed' : 'pointer',
                   fontSize: '13px'
                 }}
               >
@@ -502,33 +561,34 @@ export default function PlaylistNina() {
             </div>
           </div>
 
-          {audioOnly ? (
+          {/* YouTube Player Container */}
+          <div 
+            ref={playerRef}
+            style={{ 
+              display: audioOnly ? 'none' : 'block',
+              borderRadius: '8px',
+              overflow: 'hidden'
+            }}
+          />
+          
+          {audioOnly && (
             <div style={{ 
-              padding: '40px', 
+              padding: '30px', 
               textAlign: 'center', 
               background: '#e5e7eb', 
               borderRadius: '8px',
               color: '#6b7280'
             }}>
-              🎧 Audio mod aktivan - glazba se reproducira u pozadini
-              <div style={{ marginTop: '10px', fontSize: '14px' }}>
-                Sljedeća pjesma će se automatski pokrenuti
+              <div style={{ fontSize: '18px', marginBottom: '10px' }}>
+                🎧 Audio mod aktivan
+              </div>
+              <div style={{ fontSize: '14px' }}>
+                Glazba se reproducira u pozadini. Sljedeća pjesma će se automatski pokrenuti.
+              </div>
+              <div style={{ marginTop: '15px', fontSize: '12px', color: '#9ca3af' }}>
+                Trenutno: {currentSong?.title}
               </div>
             </div>
-          ) : (
-            <iframe
-              ref={playerRef}
-              title="youtube-player"
-              src={getYouTubeEmbedUrl(current, audioOnly)}
-              allow="autoplay; encrypted-media"
-              allowFullScreen
-              style={{ 
-                width: '100%', 
-                height: audioOnly ? '0px' : '300px', 
-                borderRadius: '8px',
-                border: 'none'
-              }}
-            />
           )}
         </section>
       )}
